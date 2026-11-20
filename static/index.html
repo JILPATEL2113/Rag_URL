@@ -1,0 +1,938 @@
+<script>
+  var $ = function (s) {
+    return document.querySelector(s);
+  };
+
+  var sessionId = null;
+
+  // Fixed: history ki jagah chatHistory use kiya hai
+  var chatHistory = [];
+
+  var statusEl = $("#status");
+  var logEl = $("#log");
+  var urlIn = $("#url");
+  var loadBtn = $("#loadBtn");
+  var qIn = $("#question");
+  var askBtn = $("#askBtn");
+
+  function setStatus(kind, nodes) {
+    statusEl.className = "status " + kind;
+    statusEl.replaceChildren.apply(statusEl, nodes);
+  }
+
+  function text(t) {
+    return document.createTextNode(t);
+  }
+
+  function strong(t) {
+    var s = document.createElement("strong");
+    s.textContent = t;
+    return s;
+  }
+
+  // API function
+  async function api(path, body) {
+    var res = await fetch(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    var data = null;
+
+    try {
+      data = await res.json();
+    } catch (e) {}
+
+    if (!res.ok) {
+      var err = new Error(
+        (data && data.detail) ||
+        "Something went wrong (" + res.status + ")."
+      );
+
+      err.status = res.status;
+      throw err;
+    }
+
+    return data;
+  }
+
+  // LOAD URL
+  $("#loadForm").addEventListener("submit", async function (e) {
+    e.preventDefault();
+
+    loadBtn.disabled = true;
+    qIn.disabled = true;
+    askBtn.disabled = true;
+
+    setStatus("", [
+      text("Reading the page... Please wait.")
+    ]);
+
+    try {
+      var d = await api("/api/load", {
+        url: urlIn.value.trim()
+      });
+
+      sessionId = d.session_id;
+
+      // Reset chat history
+      chatHistory = [];
+
+      logEl.replaceChildren();
+
+      setStatus("ok", [
+        strong(d.title),
+        text(
+          " · " +
+          new URL(d.url).hostname +
+          " · " +
+          d.passages +
+          " passages, " +
+          d.words.toLocaleString() +
+          " words"
+        )
+      ]);
+
+      qIn.disabled = false;
+      askBtn.disabled = false;
+
+      qIn.placeholder = "Ask something about this page";
+      qIn.focus();
+
+    } catch (err) {
+
+      sessionId = null;
+      chatHistory = [];
+
+      setStatus("err", [
+        text(err.message)
+      ]);
+
+      qIn.placeholder = "Load a page first";
+
+    } finally {
+
+      loadBtn.disabled = false;
+
+    }
+  });
+
+  // RENDER ANSWER AND CITATIONS
+  function renderAnswer(container, answer, sources, passageBox) {
+
+    var safeSources = Array.isArray(sources) ? sources : [];
+
+    var parts = String(answer || "").split(/(\[\d+\])/g);
+
+    parts.forEach(function (part) {
+
+      var m = part.match(/^\[(\d+)\]$/);
+
+      var src = m && safeSources.find(function (s) {
+        return Number(s.id) === Number(m[1]);
+      });
+
+      if (!src) {
+        container.appendChild(text(part));
+        return;
+      }
+
+      var chip = document.createElement("button");
+
+      chip.type = "button";
+      chip.className = "cite";
+      chip.textContent = src.id;
+
+      chip.setAttribute("aria-expanded", "false");
+      chip.setAttribute("aria-label", "Show passage " + src.id);
+
+      chip.addEventListener("click", function () {
+
+        var open =
+          chip.getAttribute("aria-expanded") === "true";
+
+        passageBox.replaceChildren();
+
+        container.querySelectorAll(".cite").forEach(function (c) {
+          c.setAttribute("aria-expanded", "false");
+        });
+
+        if (!open) {
+
+          chip.setAttribute("aria-expanded", "true");
+
+          var p = document.createElement("div");
+          p.className = "passage";
+
+          var b = document.createElement("b");
+          b.textContent = "Passage " + src.id + ": ";
+
+          p.appendChild(b);
+          p.appendChild(text(src.text || ""));
+
+          passageBox.appendChild(p);
+        }
+      });
+
+      container.appendChild(chip);
+
+    });
+  }
+
+  // ASK QUESTION
+  $("#askForm").addEventListener("submit", async function (e) {
+
+    e.preventDefault();
+
+    var question = qIn.value.trim();
+
+    if (!question || !sessionId) {
+      return;
+    }
+
+    qIn.value = "";
+    askBtn.disabled = true;
+
+    var item = document.createElement("article");
+
+    var q = document.createElement("p");
+    q.className = "q";
+    q.textContent = question;
+
+    var a = document.createElement("p");
+    a.className = "a wait";
+    a.textContent = "Reading the passages...";
+
+    var box = document.createElement("div");
+
+    item.append(q, a, box);
+
+    logEl.appendChild(item);
+
+    item.scrollIntoView({
+      behavior: "smooth",
+      block: "start"
+    });
+
+    try {
+
+      // Safe chat history array
+      var previousChat = Array.isArray(chatHistory)
+        ? chatHistory.slice(-6)
+        : [];
+
+      var d = await api("/api/ask", {
+
+        session_id: sessionId,
+
+        question: question,
+
+        history: previousChat
+
+      });
+
+      a.className = "a";
+      a.textContent = "";
+
+      renderAnswer(
+        a,
+        d.answer,
+        d.sources,
+        box
+      );
+
+      // Save conversation
+      chatHistory.push(
+        {
+          role: "user",
+          content: question
+        },
+        {
+          role: "assistant",
+          content: d.answer
+        }
+      );
+
+      // Keep only last 6 messages
+      chatHistory = chatHistory.slice(-6);
+
+    } catch (err) {
+
+      a.className = "a fail";
+      a.textContent = err.message;
+
+      if (err.status === 404) {
+
+        sessionId = null;
+
+        qIn.disabled = true;
+        qIn.placeholder = "Load the page again";
+
+        setStatus("err", [
+          text(
+            "Session expired. Please load the page again."
+          )
+        ]);
+      }
+
+    } finally {
+
+      if (sessionId) {
+        askBtn.disabled = false;
+        qIn.focus();
+      }
+
+    }
+
+  });
+
+</script>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ask Any Page | URL RAG Chatbot</title>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            background: #f4f6fb;
+            color: #202124;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 35px auto;
+            padding: 20px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 32px;
+            color: #252b42;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            color: #6b7280;
+            font-size: 15px;
+        }
+
+        .card {
+            background: white;
+            padding: 25px;
+            border-radius: 14px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.06);
+            margin-bottom: 20px;
+        }
+
+        .url-form {
+            display: flex;
+            gap: 10px;
+        }
+
+        input, textarea {
+            width: 100%;
+            padding: 14px;
+            border: 1px solid #d8dce5;
+            border-radius: 8px;
+            outline: none;
+            font-size: 15px;
+        }
+
+        input:focus, textarea:focus {
+            border-color: #536dfe;
+        }
+
+        button {
+            border: none;
+            padding: 13px 22px;
+            border-radius: 8px;
+            background: #536dfe;
+            color: white;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        button:hover {
+            background: #4055db;
+        }
+
+        button:disabled {
+            background: #a5adcc;
+            cursor: not-allowed;
+        }
+
+        .secondary-btn {
+            background: #eef0ff;
+            color: #4355c7;
+        }
+
+        .secondary-btn:hover {
+            background: #e0e5ff;
+        }
+
+        .status {
+            margin-top: 15px;
+            font-size: 14px;
+            color: #666;
+            white-space: pre-wrap;
+        }
+
+        .error {
+            color: #dc2626;
+        }
+
+        .success {
+            color: #16803c;
+        }
+
+        .page-info {
+            display: none;
+        }
+
+        .page-info h3 {
+            margin-bottom: 12px;
+            color: #252b42;
+        }
+
+        .page-info p {
+            font-size: 14px;
+            color: #666;
+            margin: 7px 0;
+            overflow-wrap: anywhere;
+        }
+
+        .chat-section {
+            display: none;
+        }
+
+        .chat-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 18px;
+        }
+
+        .chat-header h2 {
+            font-size: 21px;
+        }
+
+        .chat-box {
+            height: 420px;
+            overflow-y: auto;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 18px;
+            background: #fafbff;
+            margin-bottom: 18px;
+        }
+
+        .message {
+            margin-bottom: 18px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .message.user {
+            align-items: flex-end;
+        }
+
+        .message.assistant {
+            align-items: flex-start;
+        }
+
+        .message-content {
+            max-width: 85%;
+            padding: 13px 16px;
+            border-radius: 12px;
+            line-height: 1.6;
+            font-size: 14px;
+            overflow-wrap: anywhere;
+            white-space: pre-wrap;
+        }
+
+        .user .message-content {
+            background: #536dfe;
+            color: white;
+            border-bottom-right-radius: 3px;
+        }
+
+        .assistant .message-content {
+            background: #e9edff;
+            color: #252b42;
+            border-bottom-left-radius: 3px;
+        }
+
+        .message-label {
+            font-size: 11px;
+            color: #777;
+            margin-bottom: 5px;
+        }
+
+        .sources {
+            margin-top: 9px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 7px;
+        }
+
+        .source-chip {
+            background: white;
+            color: #4355c7;
+            border: 1px solid #cbd2ff;
+            padding: 5px 9px;
+            border-radius: 20px;
+            font-size: 11px;
+        }
+
+        .chat-form {
+            display: flex;
+            gap: 10px;
+        }
+
+        .chat-form input {
+            flex: 1;
+        }
+
+        .footer {
+            text-align: center;
+            color: #999;
+            font-size: 12px;
+            margin-top: 25px;
+        }
+
+        @media(max-width: 600px) {
+            .container {
+                margin: 15px auto;
+                padding: 12px;
+            }
+
+            .header h1 {
+                font-size: 25px;
+            }
+
+            .url-form, .chat-form {
+                flex-direction: column;
+            }
+
+            .url-form button, .chat-form button {
+                width: 100%;
+            }
+
+            .chat-box {
+                height: 380px;
+            }
+
+            .message-content {
+                max-width: 95%;
+            }
+
+            .chat-header {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="container">
+
+    <div class="header">
+        <h1>Ask Any Page</h1>
+        <p>Enter a website URL and ask questions about its content using AI.</p>
+    </div>
+
+    <!-- URL SECTION -->
+    <div class="card">
+        <form class="url-form" id="urlForm">
+            <input
+                type="url"
+                id="urlInput"
+                placeholder="https://example.com"
+                required
+            >
+            <button type="submit" id="loadBtn">Load URL</button>
+        </form>
+
+        <div class="status" id="loadStatus"></div>
+    </div>
+
+    <!-- PAGE INFORMATION -->
+    <div class="card page-info" id="pageInfo">
+        <h3>Loaded Page Information</h3>
+        <p><strong>Title:</strong> <span id="pageTitle">-</span></p>
+        <p><strong>URL:</strong> <span id="pageUrl">-</span></p>
+        <p><strong>Passages:</strong> <span id="pagePassages">-</span></p>
+        <p><strong>Words:</strong> <span id="pageWords">-</span></p>
+    </div>
+
+    <!-- CHAT SECTION -->
+    <div class="card chat-section" id="chatSection">
+
+        <div class="chat-header">
+            <h2>Chat with this webpage</h2>
+            <button type="button" class="secondary-btn" id="resetBtn">
+                Reset Chat
+            </button>
+        </div>
+
+        <div class="chat-box" id="chatBox">
+            <div class="message assistant">
+                <div class="message-label">AI Assistant</div>
+                <div class="message-content">
+                    Hello! Your webpage is loaded. Ask me anything about it.
+                </div>
+            </div>
+        </div>
+
+        <form class="chat-form" id="chatForm">
+            <input
+                type="text"
+                id="questionInput"
+                placeholder="Ask a question about this page..."
+                autocomplete="off"
+                required
+            >
+            <button type="submit" id="sendBtn">Send</button>
+        </form>
+
+        <div class="status" id="chatStatus"></div>
+
+    </div>
+
+    <div class="footer">
+        Powered by FastAPI | URL RAG Chatbot
+    </div>
+
+</div>
+
+<script>
+(function () {
+    "use strict";
+
+    // API CONFIGURATION
+    const API_BASE = "";
+
+    // APPLICATION STATE
+    let sessionId = null;
+    let conversationMessages = [];
+    let isLoading = false;
+
+    // DOM ELEMENTS
+    const urlForm = document.getElementById("urlForm");
+    const urlInput = document.getElementById("urlInput");
+    const loadBtn = document.getElementById("loadBtn");
+    const loadStatus = document.getElementById("loadStatus");
+
+    const pageInfo = document.getElementById("pageInfo");
+    const pageTitle = document.getElementById("pageTitle");
+    const pageUrl = document.getElementById("pageUrl");
+    const pagePassages = document.getElementById("pagePassages");
+    const pageWords = document.getElementById("pageWords");
+
+    const chatSection = document.getElementById("chatSection");
+    const chatBox = document.getElementById("chatBox");
+    const chatForm = document.getElementById("chatForm");
+    const questionInput = document.getElementById("questionInput");
+    const sendBtn = document.getElementById("sendBtn");
+    const chatStatus = document.getElementById("chatStatus");
+    const resetBtn = document.getElementById("resetBtn");
+
+
+    // STATUS HELPER
+    function showStatus(element, message, type = "") {
+        element.textContent = message;
+        element.className = "status " + type;
+    }
+
+
+    // RESET CHAT
+    function resetChat() {
+        conversationMessages = [];
+
+        chatBox.innerHTML = `
+            <div class="message assistant">
+                <div class="message-label">AI Assistant</div>
+                <div class="message-content">
+                    Chat reset successfully. Ask a new question!
+                </div>
+            </div>
+        `;
+
+        showStatus(chatStatus, "");
+    }
+
+
+    // ADD MESSAGE TO CHAT
+    function addMessage(role, content, sources = []) {
+        const messageDiv = document.createElement("div");
+        messageDiv.className = "message " + role;
+
+        const label = document.createElement("div");
+        label.className = "message-label";
+        label.textContent = role === "user" ? "You" : "AI Assistant";
+
+        const messageContent = document.createElement("div");
+        messageContent.className = "message-content";
+
+        // Safe text rendering
+        messageContent.textContent = content || "";
+
+        messageDiv.appendChild(label);
+        messageDiv.appendChild(messageContent);
+
+        // SOURCE CITATIONS
+        if (Array.isArray(sources) && sources.length > 0) {
+            const sourceContainer = document.createElement("div");
+            sourceContainer.className = "sources";
+
+            sources.forEach((source, index) => {
+                const chip = document.createElement("span");
+                chip.className = "source-chip";
+
+                let sourceText = "";
+
+                if (typeof source === "string") {
+                    sourceText = source;
+                } else if (source && typeof source === "object") {
+                    sourceText =
+                        source.title ||
+                        source.url ||
+                        source.source ||
+                        `Source ${index + 1}`;
+                } else {
+                    sourceText = `Source ${index + 1}`;
+                }
+
+                chip.textContent = sourceText;
+                sourceContainer.appendChild(chip);
+            });
+
+            messageDiv.appendChild(sourceContainer);
+        }
+
+        chatBox.appendChild(messageDiv);
+        chatBox.scrollTop = chatBox.scrollHeight;
+    }
+
+
+    // LOAD URL
+    urlForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+
+        if (isLoading) return;
+
+        const url = urlInput.value.trim();
+
+        if (!url) {
+            showStatus(loadStatus, "Please enter a valid URL.", "error");
+            return;
+        }
+
+        try {
+            new URL(url);
+        } catch {
+            showStatus(loadStatus, "Invalid URL. Please enter a complete URL.", "error");
+            return;
+        }
+
+        isLoading = true;
+        loadBtn.disabled = true;
+        loadBtn.textContent = "Loading...";
+
+        showStatus(loadStatus, "Fetching webpage content. Please wait...");
+        showStatus(chatStatus, "");
+
+        chatSection.style.display = "none";
+        pageInfo.style.display = "none";
+        sessionId = null;
+        conversationMessages = [];
+
+        try {
+            const response = await fetch(`${API_BASE}/api/load`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    url: url
+                })
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(
+                    data.detail || data.message || "Unable to load webpage."
+                );
+            }
+
+            if (!data.session_id) {
+                throw new Error("Session ID missing from server response.");
+            }
+
+            sessionId = data.session_id;
+
+            pageTitle.textContent = data.title || "Untitled Page";
+            pageUrl.textContent = data.url || url;
+            pagePassages.textContent = data.passages ?? "-";
+            pageWords.textContent = data.words ?? "-";
+
+            pageInfo.style.display = "block";
+            chatSection.style.display = "block";
+
+            chatBox.innerHTML = `
+                <div class="message assistant">
+                    <div class="message-label">AI Assistant</div>
+                    <div class="message-content">
+                        Webpage loaded successfully! You can now ask questions about its content.
+                    </div>
+                </div>
+            `;
+
+            showStatus(loadStatus, "Webpage loaded successfully!", "success");
+            questionInput.focus();
+
+        } catch (error) {
+            console.error("URL loading error:", error);
+
+            sessionId = null;
+            conversationMessages = [];
+
+            showStatus(
+                loadStatus,
+                "Error: " + error.message,
+                "error"
+            );
+
+        } finally {
+            isLoading = false;
+            loadBtn.disabled = false;
+            loadBtn.textContent = "Load URL";
+        }
+    });
+
+
+    // ASK QUESTION
+    chatForm.addEventListener("submit", async function (event) {
+        event.preventDefault();
+
+        const question = questionInput.value.trim();
+
+        if (!question || isLoading) return;
+
+        if (!sessionId) {
+            showStatus(chatStatus, "Please load a webpage first.", "error");
+            return;
+        }
+
+        isLoading = true;
+        sendBtn.disabled = true;
+        sendBtn.textContent = "Thinking...";
+
+        questionInput.disabled = true;
+
+        addMessage("user", question);
+        questionInput.value = "";
+
+        showStatus(chatStatus, "AI is generating your answer...");
+
+        try {
+            // Send only previous conversation messages
+            const previousMessages = conversationMessages.slice(-6);
+
+            const response = await fetch(`${API_BASE}/api/ask`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    session_id: sessionId,
+                    question: question,
+                    history: previousMessages
+                })
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(
+                    data.detail || data.message || "Unable to generate answer."
+                );
+            }
+
+            const answer = data.answer || "No answer received from AI.";
+
+            addMessage(
+                "assistant",
+                answer,
+                Array.isArray(data.sources) ? data.sources : []
+            );
+
+            // Maintain conversation history
+            conversationMessages.push(
+                { role: "user", content: question },
+                { role: "assistant", content: answer }
+            );
+
+            // Keep the latest 6 messages
+            conversationMessages = conversationMessages.slice(-6);
+
+            showStatus(chatStatus, "");
+
+        } catch (error) {
+            console.error("Chat error:", error);
+
+            addMessage(
+                "assistant",
+                "Sorry, something went wrong: " + error.message
+            );
+
+            showStatus(
+                chatStatus,
+                "Please try again.",
+                "error"
+            );
+
+        } finally {
+            isLoading = false;
+            sendBtn.disabled = false;
+            sendBtn.textContent = "Send";
+            questionInput.disabled = false;
+            questionInput.focus();
+        }
+    });
+
+
+    // RESET BUTTON
+    resetBtn.addEventListener("click", function () {
+        resetChat();
+        questionInput.focus();
+    });
+
+})();
+</script>
+
+</body>
+</html>
