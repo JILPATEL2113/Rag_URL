@@ -38,7 +38,8 @@ if not GEMINI_API_KEY:
         "Please add it to your .env file."
     )
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/"
